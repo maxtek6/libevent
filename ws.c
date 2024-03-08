@@ -58,6 +58,8 @@ struct evws_connection {
 	/* for server connections, the http server they are connected with */
 	struct evhttp *http_server;
 
+	struct evhttp_connection *http_connection;
+
 	struct evbuffer *incomplete_frames;
 	bool closed;
 };
@@ -315,7 +317,6 @@ ws_evhttp_read_cb(struct bufferevent *bufev, void *arg)
 		header_sz = payload - data;
 		evbuffer_drain(input, header_sz);
 		data = evbuffer_pullup(input, -1);
-
 		switch (type) {
 		case TEXT_FRAME:
 		case BINARY_FRAME:
@@ -323,9 +324,7 @@ ws_evhttp_read_cb(struct bufferevent *bufev, void *arg)
 				/* we already have incomplete frames in internal buffer
 				 * and need to concatenate them with final one */
 				evbuffer_add(evws->incomplete_frames, data, msg_len);
-
 				data = evbuffer_pullup(evws->incomplete_frames, -1);
-
 				evws->cb(evws, type, data,
 					evbuffer_get_length(evws->incomplete_frames), evws->cb_arg);
 				evbuffer_free(evws->incomplete_frames);
@@ -359,6 +358,15 @@ ws_evhttp_read_cb(struct bufferevent *bufev, void *arg)
 
 bailout:
 	bufferevent_decref_and_unlock_(evws->bufev);
+}
+
+static void
+ws_evhttp_writecb(struct bufferevent *bev, void *arg)
+{
+	if (evbuffer_get_length(bufferevent_get_output(bev)) == 0) {
+		/* enable reading of the reply */
+		bufferevent_enable(bev, EV_READ);
+	}
 }
 
 static void
@@ -439,6 +447,114 @@ error:
 }
 
 static void
+evws_client_write_cb(struct bufferevent *bev, void *arg)
+{
+	if (evbuffer_get_length(bufferevent_get_output(bev)) == 0) {
+		/* enable reading of the reply */
+		bufferevent_enable(bev, EV_READ);
+	}
+}
+
+static void
+evws_client_read_cb(struct bufferevent *bev, void *arg)
+{
+	struct evws_connection *evws = arg;
+	struct evbuffer *input = bufferevent_get_input(bev);
+	size_t nread = 0;
+	char *line;
+	bool ok;
+
+	// parse first line of HTTP response
+	line = evbuffer_readln(input, &nread, EVBUFFER_EOL_CRLF);
+	if (line) {
+		if (strncmp(line, "HTTP/1.1 101 ", strlen("HTTP/1.1 101 ")))
+			goto error;
+	} else {
+		goto error;
+	}
+	mm_free(line);
+
+	// parse headers until end of buffer is reached
+	line = evbuffer_readln(input, &nread, EVBUFFER_EOL_CRLF);
+	while (line) {
+		ok = false;
+		if (!strcmp(
+				line, "Sec-WebSocket-Accept: HSmrc0sMlYUkAGmm5OPpG2HaGWk=")) {
+			ok = true;
+		} else if (!strcmp(line, "Connection: Upgrade")) {
+			ok = true;
+		} else if (!strcmp(line, "Upgrade: websocket")) {
+			ok = true;
+		} else if (strlen(line) == 0) {
+			ok = true;
+		} else {
+			ok = true;
+		}
+		if (!ok) {
+			goto error;
+		}
+		mm_free(line);
+		line = evbuffer_readln(input, &nread, EVBUFFER_EOL_CRLF);
+	}
+
+	evws->bufev = bev;
+	bufferevent_setcb(bev, ws_evhttp_read_cb, NULL, ws_evhttp_error_cb, evws);
+	if (evbuffer_get_length(input) > 0) {
+		ws_evhttp_read_cb(evws->bufev, arg);
+	}
+	return;
+error:
+	// free line if error occurred during parsing
+	if (line)
+		mm_free(line);
+	// close websocket on error event
+	evws->closed = true;
+}
+
+struct evws_connection *
+evws_connect(struct bufferevent *bev, const char *uri, ws_on_msg_cb cb,
+	void *arg, int options)
+{
+	struct evhttp_uri *wsuri;
+	const char *scheme;
+	struct evws_connection *evws = NULL;
+
+	wsuri = evhttp_uri_parse(uri);
+
+	scheme = evhttp_uri_get_scheme(wsuri);
+	if (!strcmp(scheme, "wss")) {
+		if (!BEV_IS_SSL(bev)) {
+			goto error;
+		}
+	} else if (!strcmp(scheme, "ws")) {
+		if (BEV_IS_SSL(bev)) {
+			goto error;
+		}
+	} else {
+		goto error;
+	}
+	evws = mm_calloc(1, sizeof(struct evws_connection));
+	evws->cb = cb;
+	evws->cb_arg = arg;
+
+	bufferevent_setcb(
+		bev, evws_client_read_cb, evws_client_write_cb, NULL, evws);
+
+	evbuffer_add_printf(bufferevent_get_output(bev),
+		"GET %s HTTP/1.1\r\n"
+		"Connection: Upgrade\r\n"
+		"Upgrade: websocket\r\n"
+		"Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==\r\n"
+		"\r\n",
+		evhttp_uri_get_path(wsuri));
+	return evws;
+error:
+	if (evws)
+		evws_connection_free(evws);
+	return NULL;
+}
+
+static void
 make_ws_frame(struct evbuffer *output, enum WebSocketFrameType frame_type,
 	unsigned char *msg, size_t len)
 {
@@ -452,10 +568,10 @@ make_ws_frame(struct evbuffer *output, enum WebSocketFrameType frame_type,
 		header[pos++] = 126;			   /* 16 bit length */
 		header[pos++] = (len >> 8) & 0xFF; /* rightmost first */
 		header[pos++] = len & 0xFF;
-	} else {				 /* >2^16-1 */
+	} else { /* >2^16-1 */
 		int i;
 		const uint64_t tmp64 = len;
-		header[pos++] = 127;            /* 64 bit length */
+		header[pos++] = 127; /* 64 bit length */
 		/* swap bytes from host byte order to big endian */
 		for (i = 56; i >= 0; i -= 8) {
 			header[pos++] = tmp64 >> i & 0xFFu;

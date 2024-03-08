@@ -1386,7 +1386,8 @@ if (NOT EVENT__DISABLE_TESTS)
                   test-fdleak
                   test-init
                   test-time
-                  test-weof)
+                  test-weof
+                  test-ws)
 
     foreach (TESTPROG ${TESTPROGS} test-dumpevents)
         add_test_prog(${TESTPROG})

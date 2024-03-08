@@ -34,6 +34,23 @@ EVENT2_EXPORT_SYMBOL
 struct evws_connection *evws_new_session(
 	struct evhttp_request *req, ws_on_msg_cb, void *arg, int options);
 
+/** Opens new WebSocket client from HTTP connection.
+  @param evcon HTTP connection to be upgraded
+  @param headers headers to include in the HTTP request or NULL
+  @param uri WebSocket URI
+  @param cb the callback function that gets invoked on receiving message
+  with len bytes length. In case of receiving text messages user is responsible
+  to make a string with terminating \0 (with copying-out data) or use text data
+  other way in which \0 is not required
+  @param arg an additional context argument for the callback
+  @return a pointer to a newly initialized WebSocket connection or NULL
+	on error
+  @see evws_close()
+ */
+EVENT2_EXPORT_SYMBOL
+struct evws_connection *evws_connect(struct bufferevent *bev, const char *uri,
+	ws_on_msg_cb cb, void *arg, int options);
+
 /** Sends text data over WebSocket connection */
 EVENT2_EXPORT_SYMBOL
 void evws_send_text(struct evws_connection *evws, const char *packet_str);
