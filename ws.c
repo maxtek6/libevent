@@ -462,7 +462,7 @@ evws_client_read_cb(struct bufferevent *bev, void *arg)
 	struct evbuffer *input = bufferevent_get_input(bev);
 	size_t nread = 0;
 	char *line;
-	bool ok;
+	bool accept, connection, upgrade;
 
 	// parse first line of HTTP response
 	line = evbuffer_readln(input, &nread, EVBUFFER_EOL_CRLF);
@@ -477,24 +477,20 @@ evws_client_read_cb(struct bufferevent *bev, void *arg)
 	// parse headers until end of buffer is reached
 	line = evbuffer_readln(input, &nread, EVBUFFER_EOL_CRLF);
 	while (line) {
-		ok = false;
 		if (!strcmp(
 				line, "Sec-WebSocket-Accept: HSmrc0sMlYUkAGmm5OPpG2HaGWk=")) {
-			ok = true;
+			accept = true;
 		} else if (!strcmp(line, "Connection: Upgrade")) {
-			ok = true;
+			connection = true;
 		} else if (!strcmp(line, "Upgrade: websocket")) {
-			ok = true;
-		} else if (strlen(line) == 0) {
-			ok = true;
-		} else {
-			ok = true;
-		}
-		if (!ok) {
-			goto error;
+			upgrade = true;
 		}
 		mm_free(line);
 		line = evbuffer_readln(input, &nread, EVBUFFER_EOL_CRLF);
+	}
+
+	if(!accept || !connection || !upgrade) {
+		goto error;
 	}
 
 	evws->bufev = bev;

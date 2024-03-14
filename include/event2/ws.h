@@ -34,9 +34,8 @@ EVENT2_EXPORT_SYMBOL
 struct evws_connection *evws_new_session(
 	struct evhttp_request *req, ws_on_msg_cb, void *arg, int options);
 
-/** Opens new WebSocket client from HTTP connection.
-  @param evcon HTTP connection to be upgraded
-  @param headers headers to include in the HTTP request or NULL
+/** Opens new WebSocket client.
+  @param bev bufferevent to HTTP server to be upgraded
   @param uri WebSocket URI
   @param cb the callback function that gets invoked on receiving message
   with len bytes length. In case of receiving text messages user is responsible
